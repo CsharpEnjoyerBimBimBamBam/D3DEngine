@@ -8,12 +8,15 @@ using System.Drawing;
 using System.Runtime.Remoting.Contexts;
 using System.Collections.Generic;
 using SharpDX;
+using SharpDX.Direct2D1;
+using System.Windows.Forms;
+using System.Linq;
 
 namespace DirectXEngine
 {
     public class ShaderResource : IDisposable
     {
-        public ShaderResource(byte[] data, int stride, int slot, bool DisposeAfterSet = true, ShaderResourceViewDescription? description = null)
+        public ShaderResource(byte[] data, int stride, int slot, bool disposeAfterSet, ShaderResourceViewDescription? description)
         {
             ExceptionHelper.ThrowIfNull(data);
             ExceptionHelper.ThrowByCondition(data.Length % stride != 0, _StrideException);
@@ -21,24 +24,38 @@ namespace DirectXEngine
             Stride = stride;
             Slot = slot;
             Description = description;
-            _DisposeAfterSet = DisposeAfterSet;
+            _DisposeAfterSet = disposeAfterSet;
             IsDataValid = _Data.Length != 0;
         }
 
-        public ShaderResource(Resource resource, int slot, bool DisposeAfterSet = true, ShaderResourceViewDescription? description = null)
+        public ShaderResource(Resource resource, int slot, bool disposeAfterSet, ShaderResourceViewDescription? description)
         {
             ExceptionHelper.ThrowIfNull(resource);
             _Resource = resource;
             Slot = slot;
             IsDataValid = true;
             Description = description;
-            _DisposeAfterSet = DisposeAfterSet;
+            _DisposeAfterSet = disposeAfterSet;
         }
+
+        public ShaderResource(Resource resource, int slot, ShaderResourceViewDescription description) : this(resource, slot, true, description) { }
+
+        public ShaderResource(byte[] data, int stride, int slot, ShaderResourceViewDescription description) : this(data, stride, slot, true, description) { }
+
+        public ShaderResource(Resource resource, int slot, bool disposeAfterSet) : this(resource, slot, disposeAfterSet, null) { }
+
+        public ShaderResource(byte[] data, int stride, int slot, bool disposeAfterSet) : this(data, stride, slot, disposeAfterSet, null) { }
+
+        public ShaderResource(byte[] data, int stride, int slot) : this(data, stride, slot, true) { }
+
+        public ShaderResource(Resource resource, int slot) : this(resource, slot, true) { }
+
+        private ShaderResource(bool isDataValid) => IsDataValid = isDataValid;
 
         public int Stride { get; }
         public int Slot { get; }
         public bool IsDataValid { get; } = false;
-        internal static ShaderResource Invalid => new ShaderResource(new byte[0], 1, 0);
+        internal static ShaderResource Invalid => new ShaderResource(false);
         internal ShaderResourceViewDescription? Description { get; }
         private Resource _Resource;
         private ShaderResourceView _ShaderResourceView;
@@ -46,13 +63,15 @@ namespace DirectXEngine
         private bool _DisposeAfterSet;
         private const string _StrideException = "Data length must be a multiple of stride";
 
-        public ShaderResource Create<T>(T[] data, int slot, bool DisposeAfterSet = true, ShaderResourceViewDescription? description = null) 
+        public static ShaderResource Create<T>(IReadOnlyList<T> data, int slot, bool DisposeAfterSet = true, ShaderResourceViewDescription? description = null) 
             where T : struct
         {
             byte[] dataBytes = EngineUtilities.ToByteArray(data);
             int stride = Utilities.SizeOf<T>();
             return new ShaderResource(dataBytes, stride, slot, DisposeAfterSet, description);
         }
+
+        public static ShaderResource CreateEmpty(int slot) => new ShaderResource(new byte[16], 16, slot);
 
         internal void Set(Device device)
         {
@@ -68,7 +87,7 @@ namespace DirectXEngine
                 else
                     _ShaderResourceView = new ShaderResourceView(device, resource);
             }
-
+            
             SetResourceView(device, _ShaderResourceView);
 
             if (_DisposeAfterSet)

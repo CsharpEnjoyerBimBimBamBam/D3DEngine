@@ -13,7 +13,7 @@ namespace DirectXEngine
         {
             ExceptionHelper.ThrowIfNull(vertexBufferData);
             ExceptionHelper.ThrowIfOutOfRange(vertexBufferStride, 0, double.MaxValue);
-            ExceptionHelper.ThrowByCondition(vertexBufferData.Length, _VertexBufferDataException, e => e % vertexBufferStride != 0);
+            ExceptionHelper.ThrowByCondition(vertexBufferData.Length % vertexBufferStride != 0, _VertexBufferDataException);
 
             VertexBufferData = vertexBufferData;
             VertexBufferStride = vertexBufferStride;

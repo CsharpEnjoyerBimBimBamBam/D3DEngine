@@ -8,12 +8,12 @@ namespace DirectXEngine
     {
         public Camera() : this(false, true)
         {
-            
+
         }
 
         internal Camera(bool isInstantiated) : this(isInstantiated, true)
         {
-            
+
         }
 
         internal Camera(bool isInstantiated, bool initialize) : base(isInstantiated)
@@ -24,7 +24,6 @@ namespace DirectXEngine
             Graphics = new Graphics(this);
             UpdateFieldOfView(_DefaultFieldOfView);
         }
-
         public static Camera Main { get; } = new MainCamera(true);
         public Color SkyColor { get; set; } = Color.SkyBlue;
         public bool UsePerspective { get; set; } = true;
@@ -44,7 +43,6 @@ namespace DirectXEngine
             {
                 ExceptionHelper.ThrowIfOutOfRange(value, 0, double.PositiveInfinity);
                 _FarClipPlane = value;
-                UpdateFrustrum();
             }
         }
         public float NearClipPlane
@@ -54,7 +52,6 @@ namespace DirectXEngine
             {
                 ExceptionHelper.ThrowIfOutOfRange(value, 0, double.PositiveInfinity);
                 _NearClipPlane = value;
-                UpdateFrustrum();
             }
         }
         public bool UseReversedZDepthBuffer
@@ -114,7 +111,7 @@ namespace DirectXEngine
                 _OrthographicSize = value;
             }
         }
-        public Frustum Frustum => _Frustum;
+        public Frustum Frustum => Frustum.Calculate(this);
         public float FieldOfViewRadians { get; private set; }
         internal virtual Graphics Graphics { get; }
         private bool _UseReversedZDepthBuffer = false;
@@ -123,15 +120,14 @@ namespace DirectXEngine
         private float _NearClipPlane = 0.1f;
         private Size2F _OrthographicSize;
         private const float _DefaultFieldOfView = 60;
-        private Frustum _Frustum;
 
         public Vector3 WorldToScreenPosition(Vector3 position) => Vector3.Transform(position, WorldToScreenMatrix).ToVector3();
 
         public Vector3 ScreenToWorldPosition(Vector3 position) => Vector3.Transform(position, ScreenToWorldMatrix).ToVector3();
 
-        internal override GameObject Copy(bool isInstantiated)
+        protected override GameObject CopyWithoutChildrens()
         {
-            Camera copy = (Camera)base.Copy(isInstantiated);
+            Camera copy = (Camera)base.CopyWithoutChildrens();
             copy._FieldOfView = _FieldOfView;
             copy.FieldOfViewRadians = FieldOfViewRadians;
             copy._FarClipPlane = _FarClipPlane;
@@ -144,9 +140,6 @@ namespace DirectXEngine
         {
             _FieldOfView = fieldOfViewDegrees;
             FieldOfViewRadians = MathUtil.DegreesToRadians(fieldOfViewDegrees);
-            UpdateFrustrum();
         }
-
-        private void UpdateFrustrum() => _Frustum = Frustum.Calculate(this);
     }
 }

@@ -5,6 +5,7 @@
         Plane,
         Cube,
         DirectionalLight,
-        Spotlight
+        Spotlight,
+        PointLight
     }
 }

@@ -10,11 +10,9 @@ namespace DirectXEngine
         public Matrix ModelViewProjection;
         public Matrix ModelLocalToWorldDirection;
         public Matrix ModelLocalToWorld;
-        public Matrix CameraWorldToLocal;
-        public Matrix CameraLocalToScreen;
-        public Matrix CameraScreenToWorld;
-        public Vector4 CameraPosition;
+        public Vector3 CameraPosition;
+        public Vector3 CameraForward;
         public float GlobalIllumination;
-        private Vector3 _Padding1;
+        public int IsHaveTexture;
     }
 }

@@ -3,13 +3,8 @@ using SharpDX;
 
 namespace DirectXEngine
 {
-    public class Material : Component
+    public class Material
     {
-        public Material(GameObject attachedGameObject) : base(attachedGameObject)
-        {
-
-        }
-
         public Shader Shader
         {
             get
@@ -21,32 +16,32 @@ namespace DirectXEngine
             set
             {
                 ExceptionHelper.ThrowIfNull(value);
-                ExceptionHelper.ThrowByCondition(value.VertexShader == null, _ShaderMissException);
+                ExceptionHelper.ThrowByCondition(value.VertexShader == null && value.PixelShader == null, _ShaderMissException);
                 _Shader = value;
             }
         }
         public Color Color { get; set; } = Color.White;
-        public double Reflectivity
+        public Texture Texture
         {
-            get => _Reflectivity;
+            get => _Texture;
             set
             {
-                ExceptionHelper.ThrowIfOutOfRange01(value);
-                _Reflectivity = value;
+                _Texture = value;
+                TextureChanged?.Invoke(_Texture);
             }
         }
-        public double Roughness
-        {
-            get => _Roughness;
-            set
-            {
-                ExceptionHelper.ThrowIfOutOfRange01(value);
-                _Roughness = value;
-            }
-        }
-        private double _Reflectivity = 1;
-        private double _Roughness = 1;
+        internal event Action<Texture> TextureChanged;
+        private Texture _Texture;
         private Shader _Shader;
-        private const string _ShaderMissException = "Vertex shader is required";
+        private const string _ShaderMissException = "Material must have at least vertex shader or pixel shader";
+    }
+
+    public enum ShaderDataType
+    {
+        Matrix,
+        Vector3,
+        Vector4,
+        Float,
+        Int
     }
 }

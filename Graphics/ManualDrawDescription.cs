@@ -1,14 +1,16 @@
-﻿namespace DirectXEngine
+﻿using SharpDX.Direct3D11;
+
+namespace DirectXEngine
 {
     internal class ManualDrawDescription
     {
-        public ManualDrawDescription(Shader shader, byte[] constantBufferData)
+        public ManualDrawDescription(ShaderConstantData constantData, byte[] constantBufferData)
         {
-            Shader = shader;
+            ConstantData = constantData;
             ConstantBufferData = constantBufferData;
         }
 
-        public Shader Shader { get; }
+        public ShaderConstantData ConstantData { get; }
         public byte[] ConstantBufferData { get; }
     }
 }

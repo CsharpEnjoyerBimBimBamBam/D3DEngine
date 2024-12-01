@@ -1,23 +1,50 @@
-﻿using SharpDX;
+﻿using Microsoft.SqlServer.Server;
+using SharpDX;
+using SharpDX.Direct2D1;
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.Serialization;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
 
 namespace DirectXEngine
 {
-    public class GameObject
+    [Serializable]
+    [JsonConverter(typeof(GameObjectConverter))]
+    public class GameObject : Prefab
     {
         public GameObject()
         {
-            
+            _Transform = AddComponent<Transform>();
         }
 
         internal GameObject(bool isInstantiated)
         {
             IsInstantiated = isInstantiated;
+            _Transform = AddComponent<Transform>();
         }
 
-        public Transform Transform { get; private set; } = new Transform();
+        internal GameObject(bool isInstantiated, bool addTransform)
+        {
+            IsInstantiated = isInstantiated;
+            if (addTransform)
+                _Transform = AddComponent<Transform>();
+        }
+
+        [JsonIgnore]
+        public Transform Transform
+        {
+            get
+            {
+                if (_Transform == null)
+                    _Transform = GetComponent<Transform>();
+                return _Transform;
+            }
+        }
         public string Name
         {
             get => _Name;
@@ -27,83 +54,21 @@ namespace DirectXEngine
                 _Name = value;
             }
         }
-        public bool IsInstantiated { get; private set; } = false;
+        public bool Enabled 
+        {
+            get => _Enabled;
+            set => _Enabled = value;
+        }
+        [JsonIgnore]
+        public bool IsInstantiated { get; } = false;
+        private bool _Enabled = true;
+        private Transform _Transform;
         private string _Name = string.Empty;
-        private List<Component> _Components = new List<Component>();
+        [SerializeMemberAttribute] private List<Component> _Components = new List<Component>();
         private List<Startable> _Startables = new List<Startable>();
         private List<Updatable> _Updatables = new List<Updatable>();
-
-        internal virtual GameObject Copy(bool isInstantiated)
-        {
-            GameObject gameObjectCopy = new GameObject();
-            gameObjectCopy.Transform = Transform.Copy();
-            gameObjectCopy._Name = _Name;
-
-            foreach (Component component in _Components)
-            {
-                Component componentCopy = component.Copy(gameObjectCopy);
-                gameObjectCopy._Components.Add(componentCopy);
-                gameObjectCopy.UpdateComponentsOnAdd(componentCopy);
-
-                if (componentCopy is Updatable updatable)
-                {
-                    _Updatables.Add(updatable);
-                    _Startables.Add(updatable);
-                    continue;
-                }
-
-                if (componentCopy is Startable startable)
-                    _Startables.Add(startable);
-            }
-
-            gameObjectCopy.IsInstantiated = isInstantiated;
-
-            return gameObjectCopy;
-        }
-
-        internal void InvokeOnInstantiate()
-        {
-            for (int i = 0; i < _Components.Count; i++)
-            {
-                if (i >= _Components.Count)
-                    return;
-
-                _Components[i].InvokeOnInstantiate();
-            }
-        }
-
-        internal void InvokeOnStart()
-        {
-            for (int i = 0; i < _Startables.Count; i++)
-            {
-                if (i >= _Startables.Count)
-                    return;
-
-                _Startables[i].InvokeOnStart();
-            }
-        }
-
-        internal void InvokeOnEnd()
-        {
-            for (int i = 0; i < _Startables.Count; i++)
-            {
-                if (i >= _Startables.Count)
-                    return;
-
-                _Startables[i].InvokeOnEnd();
-            }
-        }
-
-        internal void InvokeOnUpdate()
-        {
-            for (int i = 0; i < _Updatables.Count; i++)
-            {
-                if (i >= _Updatables.Count)
-                    return;
-
-                _Updatables[i].InvokeUpdate();
-            }
-        }
+        private const string _ComponentExistException = "Game object already have a component";
+        private const string _ComponentTypeException = "Type must be subclass of Component";
 
         public static GameObject Create(GameObjectType type)
         {
@@ -119,42 +84,32 @@ namespace DirectXEngine
                     GameObject spotlight = Scene.Current.Instantiate();
                     spotlight.AddComponent<Spotlight>();
                     return spotlight;
+                case GameObjectType.PointLight:
+                    GameObject pointLight = Scene.Current.Instantiate();
+                    pointLight.AddComponent<PointLight>();
+                    return pointLight;
                 default: return new GameObject();
             }
         }
 
-        public T GetComponent<T>() where T : class
-        {
-            T Component = _Components.FirstOrDefault(X => X is T) as T;
-            ExceptionHelper.ThrowByCondition(Component, "", e => e == null);
-            return Component;
-        }
+        public T GetComponent<T>() where T : class => _Components[GetComponentIndex<T>()] as T;
 
         public bool TryGetComponent<T>(out T component) where T : class
         {
-            component = null;
-            try
-            {
-                component = GetComponent<T>();
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
+            component = _Components.FirstOrDefault(X => X is T) as T;         
+            return component != null;
         }
 
-        public List<T> GetComponents<T>() where T : class => _Components.FindAll(X => X is T).Cast<T>().ToList();
+        public IEnumerable<T> GetComponents<T>() where T : class => _Components.FindAll(X => X is T).Cast<T>();
 
         public Component AddComponent(Type componentType)
         {
-            ExceptionHelper.ThrowByCondition(!componentType.IsSubclassOf(typeof(Component)));
-            ExceptionHelper.ThrowByCondition(_Components.Find(X => X.GetType().Equals(componentType)) != null);
+            ExceptionHelper.ThrowByCondition(!componentType.IsSubclassOf(typeof(Component)), _ComponentTypeException);
+            CheckIfComponentAdded(componentType);
 
             Component component = (Component)Activator.CreateInstance(componentType, this);
-            _Components.Add(component);
 
-            UpdateComponentsOnAdd(component);
+            UpdateComponentOnAdd(component);
 
             return component;
         }
@@ -162,19 +117,85 @@ namespace DirectXEngine
         public T AddComponent<T>() where T : Component
         {
             Type componentType = typeof(T);
-            
-            ExceptionHelper.ThrowByCondition(_Components.Find(X => X.GetType().Equals(componentType)) != null);
+
+            CheckIfComponentAdded(componentType);
 
             T component = (T)Activator.CreateInstance(componentType, this);
-            _Components.Add(component);
 
-            UpdateComponentsOnAdd(component);
+            UpdateComponentOnAdd(component);
 
             return component;
         }
 
-        private void UpdateComponentsOnAdd(Component component)
+        public void RemoveComponent<T>() where T : class
         {
+            int index = GetComponentIndex<T>();
+            _Components[index].InvokeOnRemove();
+            _Components.RemoveAt(index);
+        }
+
+        internal GameObject Copy()
+        {
+            GameObject copy = CopyWithoutChildrens();
+            CopyChildrens(copy.Transform);
+            return copy;
+        }
+
+        internal void InvokeOnInstantiate() => InvokeEvents(_Components, (updatable) => updatable.InvokeOnInstantiate());
+
+        internal void InvokeOnStart() => InvokeEvents(_Startables, (updatable) => updatable.InvokeOnStart());
+
+        internal void InvokeOnEnd() => InvokeEvents(_Startables, (updatable) => updatable.InvokeOnEnd());
+
+        internal void InvokeOnUpdate() => InvokeEvents(_Updatables, (updatable) => updatable.InvokeUpdate());
+
+        internal void InvokeOnDestroy() => InvokeEvents(_Components, (component) =>  component.InvokeOnDestroy());
+
+        protected virtual GameObject CopyWithoutChildrens()
+        {
+            GameObject gameObjectCopy = Scene.Current.Instantiate(false);
+            gameObjectCopy._Name = _Name;
+            
+            foreach (Component component in _Components)
+            {
+                Component componentCopy = component.Clone(gameObjectCopy);
+                gameObjectCopy.UpdateComponentOnAdd(componentCopy);
+            }
+
+            gameObjectCopy.InvokeOnInstantiate();
+            return gameObjectCopy;
+        }
+
+        private void CopyChildrens(Transform parent)
+        {
+            InvokeOnChildrens(children =>
+            {
+                GameObject childrenCopy = children.CopyWithoutChildrens();
+                childrenCopy.Transform.Parent = parent;
+                children.CopyChildrens(childrenCopy.Transform);
+            });
+        }
+
+        private void InvokeOnChildrens(Action<GameObject> action) =>
+            Transform.Childrens.SafetyForEach(transform => action.Invoke(transform.GameObject));
+
+        private void InvokeEvents<T>(List<T> components, Action<T> action) where T : Component => 
+            components.SafetyForEach(x => action(x));
+
+        private void CheckIfComponentAdded(Type componentType) =>
+            ExceptionHelper.ThrowByCondition(_Components.Find(X => X.GetType().Equals(componentType)) != null, _ComponentExistException + $" {componentType.Name}");
+
+        private int GetComponentIndex<T>() where T : class
+        {
+            int componentIndex = _Components.FindIndex(X => X is T);
+            ExceptionHelper.ThrowByCondition(componentIndex == -1, $"Game object have no component {typeof(T).Name}");
+            return componentIndex;
+        }
+
+        private void UpdateComponentOnAdd(Component component)
+        {
+            _Components.Add(component);
+
             if (component is Updatable updatable)
             {
                 _Updatables.Add(updatable);

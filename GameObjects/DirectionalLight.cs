@@ -5,14 +5,16 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
+using SharpDX.DXGI;
+using System.Runtime.InteropServices;
 
 namespace DirectXEngine
 {
-    public class DirectionalLight : Light
+    public class DirectionalLight : Light, IShaderResource
     {
         public DirectionalLight(GameObject attachedGameObject) : base(attachedGameObject)
         {
-            CastShadow = true;
+            FillViewProjectionMatrices();
         }
 
         public float ProjectionOffset
@@ -24,33 +26,103 @@ namespace DirectXEngine
                 _ProjectionOffset = value;
             }
         }
+        public float MaxShadowCastDistance
+        {
+            get => _MaxShadowCastDistance;
+            set
+            {
+                ExceptionHelper.ThrowIfOutOfRange(value, 0, double.PositiveInfinity);
+                _MaxShadowCastDistance = value;
+            }
+        }
+        public int ShadowMapsCount
+        {
+            get => ShadowMapTexturesCount;
+            set
+            {
+                ExceptionHelper.ThrowIfOutOfRange(value, 1, _MaxShadowMapsCount);
+                ShadowMapTexturesCount = value;
+                UpdateCameras(value);
+            }
+        }
+        public float ResolutionScaleFactor
+        {
+            get => _ResolutionScaleFactor;
+            set
+            {
+                ExceptionHelper.ThrowIfOutOfRange01(value);
+                _ResolutionScaleFactor = value;
+                UpdateCameras(ShadowMapsCount);
+            }
+        }
         internal static IReadOnlyList<DirectionalLight> DirectionalLights => _DirectionalLights;
         protected internal override byte[] ShaderResourceData
         {
             get
             {
-                Frustum[] frustums = Frustum.CalculateSubFrustums(_MainCamera, 5);
-
+                float maxShadowCastDistance = MathUtil.Clamp(_MainCamera.FarClipPlane, 0, MaxShadowCastDistance);
+                float frustumLength = maxShadowCastDistance / ShadowMapsCount;
+                
                 DirectionalLightInput input = new DirectionalLightInput
                 {
+                    BaseInput = BaseInput,
                     ForwardDirection = Transform.Forward,
-                    ViewProjection = GetViewProjectionMatrix(frustums[0]),
-                    FarClipPlane = Camera.FarClipPlane
+                    FarClipPlane = Camera.FarClipPlane,
+                    StartTextureIndex = StartTextureIndex,
+                    TexturesCount = ShadowMapsCount,
+                    MaxShadowCastDistance = maxShadowCastDistance,
+                    FrustumLength = frustumLength,
+                    ViewProjectionMatrices = _ViewProjectionMatrices
                 };
 
                 return EngineUtilities.ToByteArray(ref input);
             }
         }
         private static List<DirectionalLight> _DirectionalLights = new List<DirectionalLight>();
+        private Matrix[] _ViewProjectionMatrices = new Matrix[_MaxShadowMapsCount];
+        private Camera[] _Cameras;
         private Camera _MainCamera;
-        private float _ProjectionOffset = 10;
-        private Matrix _ViewProjectionMatrix = Matrix.Identity;
+        private float _ResolutionScaleFactor = 0.5f;
+        private float _ProjectionOffset = 20;
+        private float _MaxShadowCastDistance = 200;
+        private const int _DefaultShadowMapsCount = 3;
+        private const int _MaxShadowMapsCount = 10;
+        private static readonly int _ConstantBufferSize = EngineUtilities.GetAlignedSize<ConstantBufferData>();
+        private static ShaderConstantData _ConstantData = new ShaderConstantData(ShadowMapShader, _ConstantBufferSize);
 
-        public override Texture2D PrepareShadowMap(IList<MeshRenderer> meshRenderers, Size resolution)
+        public override void WriteShadowMapInTexture(IReadOnlyList<MeshRenderer> meshRenderers)
+        {
+            float farClipPlane = _MainCamera.FarClipPlane;
+            farClipPlane = MathUtil.Clamp(farClipPlane, 0, _MaxShadowCastDistance);
+            Frustum[] frustums = Frustum.CalculateSubFrustums(_MainCamera, _MainCamera.NearClipPlane, farClipPlane, ShadowMapsCount);
+
+            for (int i = 0; i < frustums.Length; i++)
+                WriteFrustumShadowMapInTexture(meshRenderers, frustums[i], i);
+        }
+
+        internal static ShaderResource ViewProjectionMatricesToShaderResource(int slot, bool disposeAfterSet = false)
+        {
+            List<Matrix> viewProjectionMatrices = new List<Matrix>();
+
+            foreach (DirectionalLight light in _DirectionalLights)
+                viewProjectionMatrices.AddRange(light._ViewProjectionMatrices);
+
+            return ShaderResource.Create(viewProjectionMatrices, slot, disposeAfterSet);
+        }
+
+        protected override void OnStart()
+        {
+            ShadowMapTexturesCount = _DefaultShadowMapsCount;
+            base.OnStart();
+            _DirectionalLights.Add(this);
+            UpdateCameras(_DefaultShadowMapsCount);
+            _MainCamera = Camera.Main;
+        }
+
+        private void WriteFrustumShadowMapInTexture(IReadOnlyList<MeshRenderer> meshRenderers, Frustum frustum, int index)
         {
             Dictionary<Renderer, ManualDrawDescription> rendererDescriptions = new Dictionary<Renderer, ManualDrawDescription>();
-            Frustum[] frustums = Frustum.CalculateSubFrustums(_MainCamera, 5);
-            Matrix viewProjectionMatrix = GetViewProjectionMatrix(frustums[0]);
+            Matrix viewProjectionMatrix = UpdateViewProjectionMatrix(frustum, index);
 
             foreach (MeshRenderer meshRenderer in meshRenderers)
             {
@@ -59,51 +131,32 @@ namespace DirectXEngine
                 ConstantBufferData input = new ConstantBufferData
                 {
                     LightViewProjection = worldViewProjection,
-                    FarClipPlane = Camera.FarClipPlane,
                     TransformZ = 0
                 };
 
-                byte[] constantBufferData = EngineUtilities.ToByteArray(ref input);               
-                rendererDescriptions[meshRenderer] = new ManualDrawDescription(ShadowMapShader, constantBufferData);
+                byte[] constantBufferData = EngineUtilities.ToByteArray(ref input, true);
+                rendererDescriptions[meshRenderer] = new ManualDrawDescription(_ConstantData, constantBufferData);
             }
 
-            Graphics graphics = Camera.Graphics;
-            graphics.Resolution = resolution;
-            graphics.DrawAll(rendererDescriptions);
-            Texture2D depthBuffer = graphics.DepthBuffer;
-            
-            return depthBuffer;
+            _Cameras[index].Graphics.DrawAll(rendererDescriptions, DepthViews[index]);
         }
 
-        protected override void OnStart()
-        {
-            base.OnStart();
-            _DirectionalLights.Add(this);
-
-            Camera.UsePerspective = false;
-
-            RasterizerStateDescription rasterizerDescription = Camera.Graphics.RasterizerDescription;
-            rasterizerDescription.DepthBias = 100000;
-
-            Camera.Graphics.RasterizerDescription = rasterizerDescription;
-            _MainCamera = Camera.Main;
-        }
-
-        private Matrix GetViewProjectionMatrix(Frustum frustum)
+        private Matrix UpdateViewProjectionMatrix(Frustum frustum, int index)
         {
             IReadOnlyList<Vector3> corners = frustum.AllCorners;
 
-            //if (IsFrustrumInsideProjectionSpace(corners))
-            //    return _ViewProjectionMatrix;
+            if (IsFrustumInsideProjectionSpace(corners, ref _ViewProjectionMatrices[index]))
+                return _ViewProjectionMatrices[index];
 
-            _ViewProjectionMatrix = CalculateViewProjectionMatrix(frustum);
-            return _ViewProjectionMatrix;
+            _ViewProjectionMatrices[index] = CalculateViewProjectionMatrix(frustum, index == 0);
+
+            return _ViewProjectionMatrices[index];
         }
 
-        private Matrix CalculateViewProjectionMatrix(Frustum frustum)
+        private Matrix CalculateViewProjectionMatrix(Frustum frustum, bool isFirstFrustum)
         {
             Vector3 forward = Transform.Forward;
-            Vector3 cameraRight = _MainCamera.Transform.Right;      
+            Vector3 cameraRight = _MainCamera.Transform.Right;
             Vector3 frustumCenter = frustum.Center;
 
             Vector3.Cross(ref forward, ref cameraRight, out Vector3 viewUp);
@@ -124,22 +177,28 @@ namespace DirectXEngine
                 Vector3.Max(ref max, ref transformedCorner, out max);
             }
             
-            Vector3.Add(ref max, ref _ProjectionOffset, out max);
-            Vector3.Subtract(ref min, ref _ProjectionOffset, out min);
+            if (isFirstFrustum)
+            {
+                Vector3.Add(ref max, ref _ProjectionOffset, out max);
+                Vector3.Subtract(ref min, ref _ProjectionOffset, out min);
+            }
 
-            return viewMatrix * Matrix.OrthoOffCenterLH(min.X, max.X, min.Y, max.Y, min.Z, max.Z);
+            Matrix projection = Matrix.OrthoOffCenterLH(min.X, max.X, min.Y, max.Y, min.Z, max.Z);
+            Matrix.Multiply(ref viewMatrix, ref projection, out Matrix viewProjection);
+
+            return viewProjection;
         }
 
-        bool IsFrustrumInsideProjectionSpace(IReadOnlyList<Vector3> corners)
+        private bool IsFrustumInsideProjectionSpace(IReadOnlyList<Vector3> corners, ref Matrix viewProjectionMatrix)
         {
             Vector3 transformedCorner;
 
             for (int i = 0; i < corners.Count; i++)
             {
                 Vector3 corner = corners[i];
-                Vector3.Transform(ref corner, ref _ViewProjectionMatrix, out transformedCorner);
+                Vector3.Transform(ref corner, ref viewProjectionMatrix, out transformedCorner);
                 Vector3.Abs(ref transformedCorner, out Vector3 absTransformedCorner);
-
+                
                 if (absTransformedCorner.X > 1 || absTransformedCorner.Y > 1 || absTransformedCorner.Z > 1)
                     return false;
             }
@@ -147,11 +206,45 @@ namespace DirectXEngine
             return true;
         }
 
+        private void UpdateCameras(int count)
+        {
+            _Cameras = new Camera[count];
+            Size resolution = ShadowMap.Textures.Resolution;
+
+            for (int i = 0; i < count; i++)
+            {
+                Camera camera = Scene.Current.Instantiate<Camera>();
+                Graphics graphics = camera.Graphics;
+                graphics.Resolution = resolution;
+                RasterizerStateDescription rasterizerDescription = graphics.RasterizerDescription;
+                rasterizerDescription.DepthBias = 100000;
+                graphics.RasterizerDescription = rasterizerDescription;
+                graphics.OutputMode = OutputMode.DepthBuffer;
+
+                _Cameras[i] = camera;
+                resolution.Width = (int)(resolution.Width * _ResolutionScaleFactor);
+                resolution.Height = (int)(resolution.Height * _ResolutionScaleFactor);
+            }
+        }
+
+        private void FillViewProjectionMatrices()
+        {
+            for (int i = 0; i < _ViewProjectionMatrices.Length; i++)
+                _ViewProjectionMatrices[i] = Matrix.Identity;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 16)]
         private struct DirectionalLightInput
         {
+            public BaseLightInput BaseInput;
             public Vector3 ForwardDirection;
-            public Matrix ViewProjection;
             public float FarClipPlane;
+            public int StartTextureIndex;
+            public int TexturesCount;
+            public float MaxShadowCastDistance;
+            public float FrustumLength;
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 10)]
+            public Matrix[] ViewProjectionMatrices;
         }
     }
 }

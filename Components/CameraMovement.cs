@@ -20,6 +20,7 @@ namespace DirectXEngine
         private float _MovementSpeed = 5;
         private float _RotationSpeed = 100;
         private float _SpeedMultiplier = 1;
+        private Vector3 _FullRotation;
 
         protected override void OnUpdate()
         {
@@ -62,7 +63,8 @@ namespace DirectXEngine
             if (!Rotate)
                 return;
 
-            Transform.WorldRotation += rotation * (_RotationSpeed * Time.FrameTime);
+            _FullRotation += rotation * (_RotationSpeed * Time.FrameTime);
+            Transform.WorldEulerAngles = _FullRotation;
         }
     }
 }

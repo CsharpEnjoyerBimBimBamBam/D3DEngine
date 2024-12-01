@@ -9,6 +9,7 @@ using System.Windows.Forms;
 using System.Linq;
 using System.Collections.Generic;
 using System.Data.OleDb;
+using System.Reflection;
 
 namespace DirectXEngine
 {
@@ -16,28 +17,7 @@ namespace DirectXEngine
     {
         public MeshRenderer(GameObject attachedGameObject) : base(attachedGameObject)
         {
-            InputElement[] inputElements = new InputElement[]
-            {
-                new InputElement("POSITION", 0, Format.R32G32B32_Float, 0),
-                new InputElement("NORMAL", 0, Format.R32G32B32_Float, 0),
-            };
-            
-            int constantBufferSize = Utilities.SizeOf<ConstantBufferInput>();
-
-            Shader meshShader = new Shader(inputElements, PrimitiveTopology.TriangleList, constantBufferSize);
-
-            ShaderData vertexShader = new ShaderData(ShaderProfile.vs_5_0, "VS");
-            ShaderData pixelShader = new ShaderData(ShaderProfile.ps_5_0, "PS");
-            
-            string shaderPath = "C:\\sisharp\\DirectXEngine\\DirectXEngine\\Shaders\\MeshShader.fx";
-            
-            vertexShader.CompileFromFile(shaderPath);
-            pixelShader.CompileFromFile(shaderPath);
-
-            meshShader.VertexShader = vertexShader;
-            meshShader.PixelShader = pixelShader;
-
-            Material.Shader = meshShader;
+            Material.Shader = _MeshShader;
         }
 
         public Mesh Mesh
@@ -71,24 +51,28 @@ namespace DirectXEngine
         }
         private bool _UseFlatShading = false;
         private Mesh _Mesh;
-        private readonly int _VertexBufferStride = Utilities.SizeOf<Vector3>() * 2;
-        private readonly int _VectorSize = Utilities.SizeOf<Vector3>();
+        private readonly int _VertexBufferStride = (Utilities.SizeOf<Vector3>() * 2) + Utilities.SizeOf<Vector2>();
+        private readonly int _Vector3Size = Utilities.SizeOf<Vector3>();
+        private readonly int _Vector2Size = Utilities.SizeOf<Vector2>();
         private static ShaderResource _DirectionalLightsInput;
         private static ShaderResource _PointLightsInput;
         private static ShaderResource _SpotlightsInput;
-        private static bool _IsInitialized = false;
-        private static ShadowMap _DirectionalLightShadowMap;
-        private static ShadowMap _PointLightShadowMap;
-        private static ShadowMap _SpotlightShadowMap;
-        private static ShaderSampler _ShadowMapSampler;
+        private static bool _IsUpdateInitialized = false;
+        private static bool _IsStartInitialized = false;
+        private static ShaderSampler _ShadowMapSampler = GetShadowMapSamler();
+        private ShaderSampler _TextureSampler;
         private static List<MeshRenderer> _MeshRenderers = new List<MeshRenderer>();
+        private static Shader _MeshShader = CreateMeshShader();
+        private ShaderResource _Texture;
 
         public Component Clone()
         {
             MeshRenderer componentCopy = MemberwiseClone() as MeshRenderer;
-            componentCopy._Mesh = Mesh.Clone() as Mesh;          
+            componentCopy._Mesh = Mesh?.Clone() as Mesh;
             return componentCopy;
         }
+
+        protected override bool NeedToDraw(Camera camera) => camera.Frustum.CheckForIntersection(Transform, _Mesh.Bounds);
 
         protected override ShaderDynamicResources GetResources(Camera camera)
         {
@@ -99,94 +83,103 @@ namespace DirectXEngine
                 ModelViewProjection = localToWorld * camera.WorldToScreenMatrix,
                 ModelLocalToWorldDirection = Transform.RotationMatrix,
                 ModelLocalToWorld = localToWorld,
-                CameraScreenToWorld = camera.ScreenToWorldMatrix,
-                CameraPosition = camera.Transform.WorldPosition.ToVector4(),
-                GlobalIllumination = Light.GlobalIllumination
+                CameraPosition = camera.Transform.WorldPosition,
+                CameraForward = camera.Transform.Forward,
+                GlobalIllumination = Light.GlobalIllumination,
+                IsHaveTexture = _Texture.IsDataValid ? 1 : 0,
             };
-
-            byte[] constantBufferData = EngineUtilities.ToByteArray(ref input);
+            
             ShaderResource[] shaderResource = new ShaderResource[]
             {
                 _PointLightsInput,
                 _DirectionalLightsInput,
                 _SpotlightsInput,
-                _DirectionalLightShadowMap.Resource,
-                _SpotlightShadowMap.Resource,
+                Light.GetShadowMap<PointLight>().ToShaderResource(3, false),
+                Light.GetShadowMap<DirectionalLight>().ToShaderResource(4, false),
+                Light.GetShadowMap<Spotlight>().ToShaderResource(5, false),
+                _Texture
             };
 
             ShaderSampler[] samplers = new ShaderSampler[]
             {
-                _ShadowMapSampler
+                _ShadowMapSampler,
+                _TextureSampler
             };
 
+            byte[] constantBufferData = EngineUtilities.ToByteArray(ref input);
             return new ShaderDynamicResources(constantBufferData, shaderResource, samplers);
         }
 
         protected override void OnStart()
         {
             if (_Mesh != null)
+            {
                 UpdateGraphicsSettings(GetUpdate(_Mesh));
-
-            if (_ShadowMapSampler == null)
-                _ShadowMapSampler = GetShadowMapSamler();
-
+                //_Mesh = null;
+            }
+            
             _MeshRenderers.Add(this);
+            
+            UpdateTexture(Material.Texture);
+            Material.TextureChanged += UpdateTexture;
+
+            if (!_IsStartInitialized)
+                _IsStartInitialized = true;
         }
 
         protected override void OnUpdate()
         {
-            if (!_IsInitialized)
+            if (!_IsUpdateInitialized)
             {
                 OnFrameRenderStart();
-                _IsInitialized = true;
+                _IsUpdateInitialized = true;
             }
         }
 
-        protected override void OnEnd() => _IsInitialized = false;
+        protected override void OnEnd() => _IsUpdateInitialized = false;
 
-        private void OnFrameRenderStart()
+        protected override void OnRemove() => RemoveFromRender();
+
+        protected override void OnDestroy() => RemoveFromRender();
+
+        private void UpdateTexture(Texture texture)
         {
-            _PointLightShadowMap?.Dispose();
-            _DirectionalLightShadowMap?.Dispose();
-            _SpotlightShadowMap?.Dispose();
+            _Texture?.Dispose();
+            _Texture = texture != null ? texture.ToShaderResource(6, false) : ShaderResource.Invalid;
+            _TextureSampler = texture != null ? texture.GetSampler(1) : new ShaderSampler(new SamplerStateDescription()
+            {
+                Filter = Filter.MinMagMipPoint,
+                AddressU = TextureAddressMode.Border,
+                AddressV = TextureAddressMode.Border,
+                AddressW = TextureAddressMode.Border,
+                BorderColor = new SharpDX.Mathematics.Interop.RawColor4(1, 1, 1, 1),
+            }, 1);
+        }
 
+        private static void OnFrameRenderStart()
+        {
             _PointLightsInput?.Dispose();
             _DirectionalLightsInput?.Dispose();
             _SpotlightsInput?.Dispose();
 
-            int pointLightsCount = PointLight.PointLights.Count;
-            int directionalLightsCount = DirectionalLight.DirectionalLights.Count;
-            int spotLightsCount = Spotlight.Spotlights.Count;
-            
             IReadOnlyList<PointLight> pointLights = PointLight.PointLights;
             IReadOnlyList<DirectionalLight> directionalLights = DirectionalLight.DirectionalLights;
             IReadOnlyList<Spotlight> spotlights = Spotlight.Spotlights;
-
-            Size resolution = new Size(4096, 4096);
-
-            Texture2D[] directionalLightShadowMap = new Texture2D[directionalLightsCount];
-
+            
             _PointLightsInput = Light.ToShaderResource(pointLights, 0);
             _DirectionalLightsInput = Light.ToShaderResource(directionalLights, 1);
             _SpotlightsInput = Light.ToShaderResource(spotlights, 2);
-            
-            for (int i = 0; i < directionalLightsCount; i++)
-                directionalLightShadowMap[i] = directionalLights[i].PrepareShadowMap(_MeshRenderers, resolution);
-            
-            Texture2D[] spotlightShadowMap = new Texture2D[spotLightsCount];
 
-            for (int i = 0; i < spotLightsCount; i++)
-                spotlightShadowMap[i] = spotlights[i].PrepareShadowMap(_MeshRenderers, resolution);
-            
-            _DirectionalLightShadowMap = new ShadowMap(directionalLightShadowMap, resolution, 3);         
-            _SpotlightShadowMap = new ShadowMap(spotlightShadowMap, resolution, 4);
+            Light.WriteShadowMapsInTexture(pointLights, _MeshRenderers);
+            Light.WriteShadowMapsInTexture(directionalLights, _MeshRenderers);
+            Light.WriteShadowMapsInTexture(spotlights, _MeshRenderers);
         }
 
-        private ShaderSampler GetShadowMapSamler()
+        private static ShaderSampler GetShadowMapSamler()
         {
             SamplerStateDescription description = new SamplerStateDescription
             {
-                Filter = Filter.MinMagMipPoint,
+                Filter = Filter.MinMagMipLinear,
                 AddressU = TextureAddressMode.Border,
                 AddressV = TextureAddressMode.Border,
                 AddressW = TextureAddressMode.Border,
@@ -208,6 +201,15 @@ namespace DirectXEngine
             return RendererGraphicsSettings.IndexedDraw(GetVertexBufferData(mesh), indexBufferData, _VertexBufferStride, format);
         }
 
+        private void FilVertexBufferData(ref int index, byte[] vertexBufferData, byte[] data)
+        {
+            for (int i = 0; i < data.Length; i++)
+            {
+                vertexBufferData[index] = data[i];
+                index++;
+            }
+        }
+
         private byte[] GetVertexBufferData(Mesh mesh)
         {
             int verticesCount = mesh.Vertices.Length;
@@ -220,23 +222,21 @@ namespace DirectXEngine
             {
                 byte[] verticesBytes = EngineUtilities.ToByteArray(ref mesh.Vertices[i]);
                 byte[] normalsBytes = null;
+                byte[] uvsBytes = null;
 
                 if (i >= mesh.Normals.Length)
-                    normalsBytes = new byte[_VectorSize];
+                    normalsBytes = new byte[_Vector3Size];
                 else
                     normalsBytes = EngineUtilities.ToByteArray(ref mesh.Normals[i]);
 
-                for (int j = 0; j < verticesBytes.Length; j++)
-                {
-                    vertexBufferData[index] = verticesBytes[j];
-                    index++;
-                }
-
-                for (int j = 0; j < normalsBytes.Length; j++)
-                {
-                    vertexBufferData[index] = normalsBytes[j];
-                    index++;
-                }
+                if (i >= mesh.UVs.Length)
+                    uvsBytes = new byte[_Vector2Size];
+                else
+                    uvsBytes = EngineUtilities.ToByteArray(ref mesh.UVs[i]);
+                
+                FilVertexBufferData(ref index, vertexBufferData, verticesBytes);
+                FilVertexBufferData(ref index, vertexBufferData, normalsBytes);
+                FilVertexBufferData(ref index, vertexBufferData, uvsBytes);
             }
             return vertexBufferData;
         }
@@ -255,13 +255,7 @@ namespace DirectXEngine
             for (int i = 0; i < trianglesCount; i++)
             {
                 int triangleIndex = triangles[i];
-                byte[] vertexBytes = EngineUtilities.ToByteArray(ref mesh.Vertices[triangleIndex]);
-
-                for (int j = 0; j < vertexBytes.Length; j++)
-                {
-                    vertexBufferData[index] = vertexBytes[j];
-                    index++;
-                }
+                byte[] verticesBytes = EngineUtilities.ToByteArray(ref mesh.Vertices[triangleIndex]);
 
                 int triangleIndex1 = triangles[i - trianglePosition];
                 int triangleIndex2 = triangles[i - (trianglePosition - 1)];
@@ -276,11 +270,16 @@ namespace DirectXEngine
 
                 byte[] normalBytes = EngineUtilities.ToByteArray(ref normal);
 
-                for (int j = 0; j < normalBytes.Length; j++)
-                {
-                    vertexBufferData[index] = normalBytes[j];
-                    index++;
-                }
+                byte[] uvsBytes = null;
+
+                if (i >= mesh.UVs.Length)
+                    uvsBytes = new byte[_Vector2Size];
+                else
+                    uvsBytes = EngineUtilities.ToByteArray(ref mesh.UVs[triangleIndex]);
+
+                FilVertexBufferData(ref index, vertexBufferData, verticesBytes);
+                FilVertexBufferData(ref index, vertexBufferData, normalBytes);
+                FilVertexBufferData(ref index, vertexBufferData, uvsBytes);
 
                 trianglePosition++;
 
@@ -289,18 +288,32 @@ namespace DirectXEngine
             }
             return vertexBufferData;
         }
-    }
 
-    public abstract class ShadowCaster : Renderer
-    {
-        protected ShadowCaster(GameObject attachedGameObject) : base(attachedGameObject)
+        private static Shader CreateMeshShader()
         {
+            InputElement[] inputElements = new InputElement[]
+            {
+                new InputElement("POSITION", 0, Format.R32G32B32_Float, 0),
+                new InputElement("NORMAL", 0, Format.R32G32B32_Float, 0),
+                new InputElement("UV", 0, Format.R32G32_Float, 0),
+            };
 
-        }
+            int constantBufferSize = Utilities.SizeOf<ConstantBufferInput>();
 
-        protected override void OnInstantiate()
-        {
-            
+            Shader meshShader = new Shader(inputElements, PrimitiveTopology.TriangleList, constantBufferSize);
+
+            ShaderData vertexShader = new ShaderData(ShaderProfile.vs_5_0, "VS");
+            ShaderData pixelShader = new ShaderData(ShaderProfile.ps_5_0, "PS");
+
+            string shaderPath = "C:\\sisharp\\DirectXEngine\\DirectXEngine\\Shaders\\MeshShader.fx";
+
+            vertexShader.CompileFromFile(shaderPath);
+            pixelShader.CompileFromFile(shaderPath);
+
+            meshShader.VertexShader = vertexShader;
+            meshShader.PixelShader = pixelShader;
+
+            return meshShader;
         }
     }
 }

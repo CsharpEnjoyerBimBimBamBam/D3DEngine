@@ -1,24 +1,26 @@
-﻿using SharpDX;
+﻿using Assimp;
+using SharpDX;
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
+using SharpDX.DXGI;
+using SharpDX.Mathematics.Interop;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
-using Color = SharpDX.Color;
-using SharpDX.DXGI;
-using System.Linq;
 using System.Runtime.InteropServices;
+using Color = SharpDX.Color;
 
 namespace DirectXEngine
 {
-    public abstract class Light : Updatable
+    public abstract class Light : Startable, IShaderResource
     {
         protected Light(GameObject attachedGameObject) : base(attachedGameObject)
         {
-
+            _Type = GetType();
         }
 
         public Color Color { get; set; } = Color.White;
-        public bool CastShadow { get; set; }
+        public bool CastShadows { get; set; } = true;
         public static float GlobalIllumination
         {
             get => _GlobalIllumination;
@@ -28,20 +30,107 @@ namespace DirectXEngine
                 _GlobalIllumination = value;
             }
         }
-        private static float _GlobalIllumination = 0.5f;
+        protected internal abstract byte[] ShaderResourceData { get; }
+        protected static Shader ShadowMapShader { get; } = CreateShadowMapShader();
+        protected Camera Camera
+        {
+            get
+            {
+                if (_Camera == null)
+                    _Camera = CreateDefaultCamera();
+                return _Camera;
+            }
+        }
+        protected BaseLightInput BaseInput => new BaseLightInput
+        {
+            Color = Color,
+            CastShadows = CastShadows ? 1 : 0,
+        };
+        protected ShadowMap ShadowMap
+        {
+            get
+            {
+                if (_ShadowMap == null)
+                    _ShadowMap = _LightsShadowMap[_Type];
+                return _ShadowMap;
+            }
+        }
+        protected DepthStencilView[] DepthViews
+        {
+            get
+            {
+                if (_DepthViews == null)
+                    _DepthViews = CreateDepthStencilViews();
+                return _DepthViews;
+            }
+        }
+        protected int ShadowMapTexturesCount
+        {
+            get => _ShadowMapTexturesCount;
+            set
+            {
+                ExceptionHelper.ThrowIfOutOfRange(value, 1, double.PositiveInfinity);
+                _ShadowMapTexturesCount = value;
+                UpdateShadowMap(_Type);
+            }
+        }
+        protected int StartTextureIndex { get; private set; } = 0;
+        private int _ShadowMapTexturesCount = 1;
+        private ShadowMap _ShadowMap;
+        private DepthStencilView[] _DepthViews;
+        private Camera _Camera;
+        private Type _Type;
+        private static List<Light> _AllLights = new List<Light>();
+        private static float _GlobalIllumination = 0.3f;
+        private static Dictionary<Type, ShadowMap> _LightsShadowMap = new Dictionary<Type, ShadowMap>();
+        private static Dictionary<Type, Size> _LightsResoution = new Dictionary<Type, Size>();
+        private static readonly Size _DefaultResolution = new Size(4096, 4096);
 
-        public abstract Texture2D PrepareShadowMap(IList<MeshRenderer> meshRenderers, Size size);
+        public abstract void WriteShadowMapInTexture(IReadOnlyList<MeshRenderer> meshRenderers);
 
-        internal ShaderResource ToShaderResource(int slot)
+        public ShaderResource ToShaderResource(int slot, bool disposeAfterSet)
         {
             byte[] data = ShaderResourceData;
-            return new ShaderResource(data, data.Length, slot);
+            return new ShaderResource(data, data.Length, slot, disposeAfterSet);
+        }
+
+        public void Dispose()
+        {
+            _DepthViews?.SafetyForEach(x => x?.Dispose());
+        }
+
+        internal static void UpdateShadowMapResolution<T>(Size resolution) where T : Light => 
+            UpdateShadowMapResolution(typeof(T), resolution);
+
+        internal static void UpdateShadowMapResolution(Type lightType, Size resolution)
+        {
+            ValidateLightType(lightType);
+
+            if (_LightsResoution.TryGetValue(lightType, out Size size) && size == resolution)
+                return;
+
+            _LightsResoution[lightType] = resolution;
+            UpdateShadowMap(lightType);
+        }
+
+        internal static ShadowMap GetShadowMap<T>() where T : Light
+        {
+            Type lightType = typeof(T);
+            ValidateLightType(lightType);
+
+            if (_LightsShadowMap.TryGetValue(lightType, out ShadowMap shadowMap))
+                return shadowMap;
+
+            UpdateShadowMap(lightType);
+
+            return _LightsShadowMap[lightType];
         }
 
         internal static ShaderResource ToShaderResource<T>(IReadOnlyList<T> lights, int slot) where T : Light
         {
+            ValidateLightType<T>();
             if (lights.Count == 0)
-                return new ShaderResource(new byte[16], 16, slot, false);
+                return ShaderResource.Invalid;
 
             byte[] lightData = lights[0].ShaderResourceData;
             byte[] data = new byte[lightData.Length * lights.Count];
@@ -67,15 +156,114 @@ namespace DirectXEngine
             return new ShaderResource(data, stride, slot, false);
         }
 
-        protected override void OnStart()
+        internal static void WriteShadowMapsInTexture<T>(IReadOnlyList<T> lights, IReadOnlyList<MeshRenderer> meshRenderers) where T : Light
         {
-            Camera = Scene.Current.Instantiate<Camera>();
-            Camera.Graphics.OutputMode = OutputMode.DepthBuffer;
+            ValidateLightType<T>();
+            foreach (Light light in lights)
+            {
+                if (!light.CastShadows)
+                    continue;
+
+                light.WriteShadowMapInTexture(meshRenderers);
+            }
         }
 
-        protected internal abstract byte[] ShaderResourceData { get; }
-        protected static Shader ShadowMapShader { get; } = CreateShadowMapShader();
-        protected Camera Camera { get; private set; }
+        protected override void OnStart()
+        {
+            _AllLights.Add(this);
+            UpdateShadowMap(GetType());
+        }
+
+        protected override void OnDestroy()
+        {
+            _AllLights.Remove(this);
+            UpdateShadowMap(GetType());
+        }
+
+        protected override void OnRemove()
+        {
+            OnDestroy();
+        }
+
+        protected void UpdateShadowMapResolution(Size resolution) => UpdateShadowMapResolution(_Type, resolution);
+
+        protected void UpdateGraphicsDepthBias(int depthBias)
+        {
+            Graphics graphics = Camera.Graphics;
+            RasterizerStateDescription rasterizerDescription = graphics.RasterizerDescription;
+            rasterizerDescription.DepthBias = depthBias;
+            graphics.RasterizerDescription = rasterizerDescription;
+            graphics.OutputMode = OutputMode.DepthBuffer;
+        }
+
+        protected virtual DepthStencilView[] CreateDepthStencilViews()
+        {
+            DepthStencilView[] depthViews = new DepthStencilView[ShadowMapTexturesCount];
+
+            for (int i = 0; i < ShadowMapTexturesCount; i++)
+            {
+                DepthStencilView depthView = new DepthStencilView(EngineCore.Current.Device, ShadowMap.Textures.RawTexture, new DepthStencilViewDescription
+                {
+                    Format = Format.D32_Float,
+                    Dimension = DepthStencilViewDimension.Texture2DArray,
+                    Texture2DArray = new DepthStencilViewDescription.Texture2DArrayResource
+                    {
+                        ArraySize = 1,
+                        FirstArraySlice = StartTextureIndex + i,
+                        MipSlice = 0,
+                    }
+                });
+
+                depthViews[i] = depthView;
+            }
+
+            return depthViews;
+        }
+
+        private Camera CreateDefaultCamera()
+        {
+            Camera camera = Scene.Current.Instantiate<Camera>();
+            camera.Graphics.OutputMode = OutputMode.DepthBuffer;
+            return camera;
+        }
+
+        private static void UpdateShadowMap(Type lightType)
+        {
+            if (_LightsShadowMap.TryGetValue(lightType, out ShadowMap shadowMap))
+                shadowMap?.Dispose();
+
+            int texturesCount = 0;
+            foreach (Light light in _AllLights)
+            {
+                if (!light._Type.Equals(lightType))
+                    continue;
+
+                light.StartTextureIndex = texturesCount;
+                light.Dispose();
+                light._DepthViews = null;
+                light._ShadowMap = null;
+                texturesCount += light.ShadowMapTexturesCount;
+            }
+
+            Size resolution = GetDictionaryValue(_LightsResoution, lightType, () => _DefaultResolution);
+            texturesCount = texturesCount > 0 ? texturesCount : 1;
+            _LightsShadowMap[lightType] = new ShadowMap(texturesCount, resolution);
+        }
+
+        private static TValue GetDictionaryValue<TKey, TValue>(Dictionary<TKey, TValue> dictionary, TKey key, Func<TValue> defaultValue)
+        {
+            if (dictionary.TryGetValue(key, out TValue value))
+                return value;
+
+            value = defaultValue.Invoke();
+            dictionary[key] = value;
+            return value;
+        }
+
+        private static void ValidateLightType<T>() => ValidateLightType(typeof(T));
+
+        private static void ValidateLightType(Type lightType) => 
+            ExceptionHelper.ThrowByCondition(lightType.Equals(typeof(Light)), "Type must be subclass of Light");
 
         private static Shader CreateShadowMapShader()
         {
@@ -96,7 +284,6 @@ namespace DirectXEngine
             vertexShader.CompileFromFile(shaderPath);
 
             shader.VertexShader = vertexShader;
-            //shader.PixelShader = pixelShader;
 
             return shader;
         }
@@ -107,8 +294,13 @@ namespace DirectXEngine
             public Matrix LightViewProjection;
             public float FarClipPlane;
             public int TransformZ;
-            private bool _Padding1;
-            private float _Padding2;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 16)]
+        protected internal struct BaseLightInput
+        {
+            public RawColor4 Color;
+            public int CastShadows;
         }
     }
 }

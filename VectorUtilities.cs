@@ -25,5 +25,31 @@ namespace DirectXEngine
             Vector3.Cross(ref crossProduct, ref normalToPlane, out Vector3 project);
             return project;
         }
+
+        public static Vector3 ToEulerAngles(Quaternion rotation)
+        {
+            float x = rotation.X;
+            float y = rotation.Y;
+            float z = rotation.Z;
+            float w = rotation.W;
+
+            float xSquared = x * x;
+            float ySquared = y * y;
+            float zSquared = z * z;
+
+            float rootValue = 2 * ((w * y) - (x * z));
+            rootValue = MathUtil.Clamp(rootValue, -1, 1);
+            float rotationX = (float)Math.Asin(rootValue);
+
+            float sinY = 2 * ((w * z) + (x * y));
+            float cosY = 1 - (2 * (ySquared + zSquared));
+            float rotationY = (float)Math.Atan2(sinY, cosY);
+
+            float sinZ = 2 * ((w * x) + (y * z));
+            float cosZ = 1 - 2 * (xSquared + ySquared);
+            float rotationZ = (float)Math.Atan2(sinZ, cosZ);
+
+            return new Vector3(rotationX, rotationY, rotationZ);
+        }
     }
 }

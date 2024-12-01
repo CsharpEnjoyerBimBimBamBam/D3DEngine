@@ -43,6 +43,7 @@ namespace DirectXEngine
             {
                 SpotlightInput input = new SpotlightInput
                 {
+                    BaseInput = BaseInput,
                     Position = Transform.WorldPosition,
                     Direction = Transform.Forward,
                     Angle = _AngleRadians / 2,
@@ -53,15 +54,25 @@ namespace DirectXEngine
                 return EngineUtilities.ToByteArray(ref input);
             }
         }
-        private Matrix ViewProjectionMatrix => Transform.ViewMatrix * Camera.ProjectionMatrix;
-        private float _Range = 15;
+        private Matrix ViewProjectionMatrix
+        {
+            get
+            {
+                Vector3 position = Transform.WorldPosition;
+                Vector3 direction = Transform.Forward;
+                return Matrix.LookAtLH(position, direction, Vector3.Up) * Camera.ProjectionMatrix;
+            }
+        }
+        private float _Range = 50;
         private float _Angle = _DefaultAngle;
         private float _AngleRadians = MathUtil.DegreesToRadians(_DefaultAngle);
         private Graphics _Graphics;
         private static List<Spotlight> _Spotlights = new List<Spotlight>();
         private const float _DefaultAngle = 60;
+        private static readonly int _ConstantBufferSize = EngineUtilities.GetAlignedSize<ConstantBufferData>();
+        private static ShaderConstantData _ConstantData = new ShaderConstantData(ShadowMapShader, _ConstantBufferSize);
 
-        public override Texture2D PrepareShadowMap(IList<MeshRenderer> meshRenderers, Size resolution)
+        public override void WriteShadowMapInTexture(IReadOnlyList<MeshRenderer> meshRenderers)
         {
             Dictionary<Renderer, ManualDrawDescription> rendererDescriptions = new Dictionary<Renderer, ManualDrawDescription>();
             Matrix viewProjectionMatrix = ViewProjectionMatrix;
@@ -77,16 +88,14 @@ namespace DirectXEngine
                     TransformZ = 1
                 };
 
-                byte[] constantBufferData = EngineUtilities.ToByteArray(ref input);
-                rendererDescriptions[meshRenderer] = new ManualDrawDescription(ShadowMapShader, constantBufferData);
+                byte[] constantBufferData = EngineUtilities.ToByteArray(ref input, true);
+                rendererDescriptions[meshRenderer] = new ManualDrawDescription(_ConstantData, constantBufferData);
             }
 
+            ShadowMap shadowMap = ShadowMap;
             Graphics graphics = Camera.Graphics;
-            graphics.Resolution = resolution;
-            graphics.DrawAll(rendererDescriptions);
-            Texture2D depthBuffer = graphics.DepthBuffer;
-
-            return depthBuffer;
+            graphics.Resolution = shadowMap.Textures.Resolution;
+            graphics.DrawAll(rendererDescriptions, DepthViews[0]);
         }
 
         protected override void OnStart()
@@ -107,6 +116,7 @@ namespace DirectXEngine
 
         private struct SpotlightInput
         {
+            public BaseLightInput BaseInput;
             public Vector3 Position;
             public Vector3 Direction;
             public float Angle;

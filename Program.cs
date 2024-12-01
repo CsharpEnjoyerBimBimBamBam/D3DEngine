@@ -1,8 +1,4 @@
-﻿using SharpDX.DXGI;
-using System;
-using System.Runtime.InteropServices;
-using System.Windows.Forms;
-
+﻿
 namespace DirectXEngine
 {
     internal static class Program

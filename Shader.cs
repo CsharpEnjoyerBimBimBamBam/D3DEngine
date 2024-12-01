@@ -17,17 +17,32 @@ namespace DirectXEngine
             Topology = topology;
             ConstantBufferSize = constantBufferSize;
         }
-        
+
+        public Shader()
+        {
+
+        }
+
         public InputElement[] VertexShaderInput { get; private set; }
         public PrimitiveTopology Topology { get; private set; }
         public int ConstantBufferSize { get; private set; }
-        public ShaderData VertexShader 
+
+        public ShaderData VertexShader
         {
             get => _VertexShader;
             set
             {
                 CheckShader(value);
                 _VertexShader = value;
+            }
+        }
+        public ShaderData GeometryShader
+        {
+            get => _GeometryShader;
+            set
+            {
+                CheckShader(value);
+                _GeometryShader = value;
             }
         }
         public ShaderData PixelShader
@@ -76,12 +91,13 @@ namespace DirectXEngine
         }
         private ShaderData _VertexShader;
         private ShaderData _PixelShader;
+        private ShaderData _GeometryShader;
         private const string _ShaderNotCompiledException = "Shader not compiled";
 
         private void CheckShader(ShaderData data)
         {
             ExceptionHelper.ThrowIfNull(data);
-            ExceptionHelper.ThrowByCondition(data, _ShaderNotCompiledException, e => !e.IsCompiled);
+            ExceptionHelper.ThrowByCondition(!data.IsCompiled, _ShaderNotCompiledException);
         }
     }
 }

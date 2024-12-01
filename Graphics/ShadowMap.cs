@@ -2,79 +2,116 @@
 using SharpDX.Direct3D;
 using SharpDX.Direct3D11;
 using SharpDX.DXGI;
-using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
+using Resource = SharpDX.Direct3D11.Resource;
 
 namespace DirectXEngine
 {
-    public class ShadowMap : IDisposable
+    public class ShadowMap : IShaderResource
     {
-        public ShadowMap(IReadOnlyList<Texture2D> directionalLightShadowMap, Size resolution)
+        public ShadowMap(IReadOnlyList<Texture2D> shadowMaptextures, Size resolution)
         {
-            ExceptionHelper.ThrowIfNull(directionalLightShadowMap);
+            ExceptionHelper.ThrowIfNull(shadowMaptextures);
+            Textures = TextureArray.Create(shadowMaptextures, GetTextureArrayDescription(resolution));
+        }
 
-            DirectionalLightTexturesCount = directionalLightShadowMap.Count;
-
-            Texture2DDescription textureArrayDesc = new Texture2DDescription
-            {
-                Width = resolution.Width,
-                Height = resolution.Height,
-                MipLevels = 1,
-                Format = Format.R32_Float,
-                SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Default,
-                BindFlags = BindFlags.ShaderResource,
-                CpuAccessFlags = CpuAccessFlags.Read,
-                OptionFlags = ResourceOptionFlags.None
-            };
-            
-            DirectionalLightShadowMap = TextureUtilities.CreateTextureArray(directionalLightShadowMap.ToArray(), textureArrayDesc);
-
-            _DirectionalLightShadowMap = directionalLightShadowMap;
+        public ShadowMap(int texturesCount, Size resolution)
+        {
+            Textures = TextureArray.Create(texturesCount, GetTextureArrayDescription(resolution));
         }
 
         public ShadowMap(IReadOnlyList<Texture2D> directionalLightShadowMap, Size resolution, int slot) : 
             this(directionalLightShadowMap, resolution)
         {
-            Resource = ToShaderResource(slot);
+            Resource = ToShaderResource(slot, false);
         }
 
-        public Texture2D DirectionalLightShadowMap { get; private set; }
-        public int DirectionalLightTexturesCount { get; }
-        public ShaderResource Resource { get; private set; }
-        private IEnumerable<Texture2D> _DirectionalLightShadowMap;
-
-        public ShaderResource ToShaderResource(int slot)
+        public ShadowMap(int texturesCount, Size resolution, int slot) :
+            this(texturesCount, resolution)
         {
-            if (DirectionalLightTexturesCount == 0)
-                return ShaderResource.Invalid;
-
-            ShaderResourceViewDescription description = new ShaderResourceViewDescription
-            {
-                Format = Format.R32_Float,
-                Dimension = ShaderResourceViewDimension.Texture2DArray,
-                Texture2DArray = new ShaderResourceViewDescription.Texture2DArrayResource
-                {
-                    MipLevels = 1,
-                    ArraySize = DirectionalLightTexturesCount
-                }
-            };
-
-            return new ShaderResource(DirectionalLightShadowMap, slot, false, description);
+            Resource = ToShaderResource(slot, false);
         }
+
+        internal ShadowMap(TextureArray textures)
+        {
+            Textures = textures;
+        }
+
+        internal TextureArray Textures { get; private set; }
+        public ShaderResource Resource { get; private set; }
+
+        public ShaderResource ToShaderResource(int slot, bool disposeAfterSet)
+        {
+            if (Resource != null)
+                return Resource;
+
+            if (Textures == null || Textures.Count == 0)
+                return ShaderResource.CreateEmpty(slot);
+
+            Resource = Textures.ToShaderResource(slot, disposeAfterSet);
+            return Resource;
+        }
+
+        public static ShadowMap FromLights(IReadOnlyList<Light> lights, Size resolution, int slot) =>
+            new ShadowMap(CreateShadowMapTextures(lights, resolution), resolution, slot);
+
+        public static ShadowMap FromLights(IReadOnlyList<Light> lights, Size resolution) =>
+            new ShadowMap(CreateShadowMapTextures(lights, resolution), resolution);
 
         public void Dispose()
         {
-            DirectionalLightShadowMap?.Dispose();
+            Textures?.Dispose();
             Resource?.Dispose();
-            DirectionalLightShadowMap = null;
+            Textures = null;
             Resource = null;
-
-            foreach (Texture2D texture in _DirectionalLightShadowMap)
-                texture?.Dispose();
         }
+
+        private Texture2DDescription GetTextureArrayDescription(Size resolution) => new Texture2DDescription
+        {
+            Width = resolution.Width,
+            Height = resolution.Height,
+            MipLevels = 1,
+            Format = Format.R32_Typeless,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.DepthStencil | BindFlags.ShaderResource,
+            CpuAccessFlags = CpuAccessFlags.None,
+            OptionFlags = ResourceOptionFlags.None
+        };
+
+        private static Texture2D[] CreateShadowMapTextures(IReadOnlyList<Light> lights, Size resolution)
+        {
+            Texture2D[] shadowMap = new Texture2D[lights.Count(x => x.CastShadows)];
+            int index = 0;
+
+            for (int i = 0; i < lights.Count; i++)
+            {
+                Light light = lights[i];
+
+                if (!light.CastShadows)
+                    continue;
+
+                shadowMap[index] = CreateTexture(resolution);
+            }
+
+            return shadowMap;
+        }
+
+        private static Texture2D CreateTexture(Size resolution) => new Texture2D(EngineCore.Current.Device, new Texture2DDescription()
+        {
+            Format = Format.D32_Float,
+            ArraySize = 1,
+            MipLevels = 1,
+            Width = resolution.Width,
+            Height = resolution.Height,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.DepthStencil,
+            CpuAccessFlags = CpuAccessFlags.None,
+            OptionFlags = ResourceOptionFlags.None
+        });
     }
 }
